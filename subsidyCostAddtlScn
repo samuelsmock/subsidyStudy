@@ -1,0 +1,175 @@
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from plotPrices import plotPrice
+import json
+from tqdm import tqdm
+
+## This program is very similar to the npvCalculator, except instead of calculating a discounted NPV for building owners,
+## it calculates the potential cost to the government of subsidies and price brake guarantees, specifically between scenario 2 
+## and scenario 3. The details of these are found in priceDict, and must be changed there if required. Scenario 2 cooresponds to a 
+## price guarantee at current price levels and scenario 3 cooresponds to a roughly linear increase in heat pump tariffs to 34 cents
+## in 2044. See (BWP, 2022) and Pehnt et. al. 2023 for more details
+
+
+candidateBuildings = gpd.read_file('/Users/sunshinedaydream/Desktop/thesis_data_local/spatial_data/consolidatedThesisData.gpkg', layer = "buildingsFinal")
+candidateBuildings['subsidycos'] = candidateBuildings['subsidycos'].apply(lambda x: {'scn2': str(x)})
+
+
+energyDict = pd.read_csv('/Users/sunshinedaydream/Desktop/thesis_data_local/non-spatial/codeDictionaries/energeticTotalsDict.csv')
+
+priceDict = pd.read_csv('/Users/sunshinedaydream/Desktop/thesis_data_local/non-spatial/codeDictionaries/priceDict.csv')
+
+
+#optionally view the price trajectories being used
+#plotPrice(priceDict)
+
+### Merge values from energyDict to candidateBuildings based on type ###
+candidateBuildings.rename(columns={'assigned_t': 'assigned_type'}, inplace=True) 
+## necessary just because shapefiles are cut off at 10 char
+
+candidateBuildings = candidateBuildings.merge(energyDict, on = 'assigned_type', how = 'left')
+
+
+
+
+# alert user if the any buildings did not match with energy information from EnergyDict #
+if (len(candidateBuildings[candidateBuildings['spf'].isnull()]) > 0):
+    print(len(candidateBuildings[candidateBuildings['spf'].isnull()]), " buildings were not matched with energy data")
+
+def plotNPV():
+
+
+    years = pd.to_datetime([num for num in range(2024, 2024 +len(candidateBuildings.loc[0,'scn2_npv']))], format = '%Y')
+
+    plt.plot(years,  candidateBuildings.loc[42, 'scn1_npv'], label='Scenario 1', linewidth = 2.5,)
+    plt.plot(years,  candidateBuildings.loc[42,'scn2_npv'], label='Scenario 2', linewidth = 2.5,)
+    plt.plot(years,  candidateBuildings.loc[42, 'scn3_npv'], label='Scenario 3', linewidth = 2.5,)
+    plt.plot(years,  candidateBuildings.loc[42, 'hist_npv'], label='Pre 2022 Historic Average', linewidth = 2.5,)
+
+    plt.xlim(years[0], years[-1])
+    plt.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
+    # Add labels and legend
+
+    plt.grid(True) 
+    plt.xlabel('Years Past 2024')
+    plt.ylabel(f'NPV @ {round(repDisc *100, 2)}%')
+    plt.title(f'NPV of Air/Water Heatpump in 140 m2 SFH Installed in {2024+start} \n under different Price Trajectories. \n {"Ignoring FF boiler replacement cost" if remLife > 100 else "Taking into account a fossil fuel boiler that needs to be replaced anyway in " + str(remLife) + " years"} \n {("Subsidy: " + str(100*subsidy) + "%")}')
+    plt.legend()
+
+    # Show the plot
+    plt.show()
+
+
+### on each building loop through the 15 year period to sum the NPV and add it as a column to 
+# candidate buuldings ###
+
+##Returns a series showing the NPV after x number of years. (IE it will have an entry for each return period from 0 to 20 in most use cases)
+def subsidyCalc(building, energyPrices, discRate, termStart, termEnd, ffBoilerUsefulLife, upfrontSubsidy): ##building variable is a whole row in the buildings dataset
+
+    ## Check against boundary conditions of the study **
+    if ffBoilerUsefulLife < termStart or (upfrontSubsidy !=0 & termStart != 0):
+        print("Error - This function is intended to only consider subsidies in 2024 and FF boiler useful life must be greater than or equal to term start (HP installation date)")
+        return NULL
+
+   
+    upfrontCost = 0
+  
+    
+
+    ### 1. Calculate discounted cost of a subsidy of inital install
+    if upfrontSubsidy != 0:
+        if termStart < 5 & termStart >= 0:
+            upfrontCost = -1 * building['living_are'] * (building['upfrontCostPerM2'] * (1-0.06*(termStart))) * \
+                upfrontSubsidy * (1+discRate) ** (-1*termStart) 
+        else:
+            upfrontCost = -1 * building['living_are'] * building['upfrontCostPerM2'] * 0.7 * \
+                upfrontSubsidy * (1+discRate) ** (-1*termStart) 
+    ## the (1-0.06*(termStart) term reflects that prices are anticipted to drop 30% over the next 5 years
+
+    ## 2. Calculate discounted cost of guaranteeing a price through price brakes where the governtment essentially pays 
+    ## the difference between the market rate and the price brake 
+    return int(upfrontCost)
+    #return HPUpfront - ffUpfront + HPOngoing - ffOngoing
+
+#(subsidycos(candidateBuildings.loc[0], energyDict, 'scn1', 0.028, 1, 20, 100000, 0))
+
+### Each Item in this list represents a specific scenario we would like to investigate ##
+testParameters = [
+    {
+    'termStart': 0,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  0,
+    'upfrontSubsidy': 0},
+    {
+    'termStart': 0,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  0,
+    'upfrontSubsidy': 0.3},
+    {
+    'termStart': 5,
+    'termEnd': 25,
+    'ffBoilerUsefulLife':  5,
+    'upfrontSubsidy': 0},
+    
+    {
+    'termStart': 0,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  10,
+    'upfrontSubsidy': 0},
+
+    {
+    'termStart': 0,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  10000000000,
+    'upfrontSubsidy': 0},
+
+    {
+    'termStart': 0,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  10000000000,
+    'upfrontSubsidy': 0.3},
+
+    {
+    'termStart': 20,
+    'termEnd': 20,
+    'ffBoilerUsefulLife':  10000000000,
+    'upfrontSubsidy': 0.3}
+
+
+]
+
+## This will simply run NPV for all the different scenarios we are interested in and return a JSON object with \
+## keys of (price) Scenarios and values of ordered lists for each potential decision a building owner could make
+
+def scenarioPopulator(bld):
+    result = bld['subsidycos']
+    otherSubsidies = [] 
+     # the result will be a python list, which must be matched with the order of testParameters for a meaningfull interpretation
+     
+    for param in testParameters:
+        otherSubsidies.append(subsidyCalc(building = bld, discRate = 0.028, energyPrices = priceDict, **param))
+            ##index 19 is the NPV after 20 years as the list is 0 indexed
+    result['scn1'] = otherSubsidies
+    result['scn3'] = otherSubsidies
+    result['hist'] = otherSubsidies
+    return result
+    
+   
+
+
+tqdm.pandas()
+
+
+candidateBuildings['subsidyNPV'] = candidateBuildings.progress_apply(scenarioPopulator, axis =1)
+
+candidateBuildings.drop(columns = ['subsidycos'] )
+
+
+candidateBuildings.to_file('/Users/sunshinedaydream/Desktop/thesis_data_local/spatial_data/scratch/test18.shp')
+# Plot the columns 'a', 'b', and 'c' on the same graph
+
+
+
+#plotNPV()
+#candidateBuildings.to_csv('/Users/sunshinedaydream/Desktop/thesis_data_local/spatial_data/scratch/test11.csv')
